@@ -1,0 +1,87 @@
+name: Deploy Laravel Backend to Dev
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.DEV_SERVER_HOST }} >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy to EC2 Dev Server
+        run: |
+          ssh ${{ secrets.DEV_SERVER_USER }}@${{ secrets.DEV_SERVER_HOST }} '
+            set -e
+
+            echo "Navigating to project directory..."
+            cd /home/ubuntu/projects/CN_LMS_Backend_Dev
+
+            echo "Stashing any local changes..."
+            git stash --all
+
+            echo "Pulling latest code from Git..."
+            git pull origin main --rebase
+
+            echo "Applying stashed changes..."
+            git stash pop
+
+            echo "Running Composer install..."
+            composer install --no-dev --prefer-dist
+
+            if [ ! -f .env ]; then
+              echo "Copying .env.example to .env..."
+              cp .env.example .env
+            fi
+
+            echo "Creating storage views directory..."
+            mkdir -p storage/framework/views
+            chmod -R 775 storage/framework/views
+
+            echo "Creating database file..."
+            touch database/database.sqlite
+
+            echo "Running Artisan commands..."
+            php artisan key:generate --force
+            php artisan migrate --force
+            php artisan cache:clear
+            php artisan config:clear
+            php artisan route:clear
+            php artisan view:clear
+            php artisan config:cache
+            php artisan route:cache
+            php artisan storage:link
+
+            echo "Setting final file permissions..."
+            sudo chown -R www-data:www-data storage bootstrap/cache
+            sudo chmod -R 775 storage bootstrap/cache
+
+            echo "Restarting services..."
+            sudo systemctl restart php8.2-fpm
+            sudo systemctl restart nginx
+
+            echo "Deployment complete!"
+          '
