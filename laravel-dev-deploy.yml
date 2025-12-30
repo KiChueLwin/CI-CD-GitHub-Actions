@@ -1,0 +1,108 @@
+name: Deploy Laravel Backend to Dev
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.DEV_SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.DEV_SERVER_HOST }} >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy to EC2 Dev Server
+        run: |
+          ssh ${{ secrets.DEV_SERVER_USER }}@${{ secrets.DEV_SERVER_HOST }} '
+            set -e
+
+            echo "Navigating to project directory..."
+            cd /home/ubuntu/projects/CN_LMS_Backend_Dev
+
+            echo "Fixing permissions before deployment..."
+            # Fix permissions for uploaded files and logs
+            sudo chown -R www-data:www-data storage/ public/uploads/ 2>/dev/null || true
+            sudo chmod -R 775 storage/ public/uploads/ 2>/dev/null || true
+            
+            # Clear laravel log
+            sudo truncate -s 0 storage/logs/laravel.log 2>/dev/null || true
+            
+            # Clear compiled views
+            sudo rm -rf storage/framework/views/* 2>/dev/null || true
+
+            echo "Resetting git to clean state..."
+            # Reset only tracked files, keep untracked (like uploads)
+            git reset --hard HEAD
+            
+            # Clean only vendor and cache directories, NOT uploads
+            git clean -fdX  # Only remove ignored files
+            # OR be more specific:
+            # git clean -fd --exclude=public/uploads/ --exclude=.env
+
+            echo "Pulling latest code from Git..."
+            git pull origin main
+
+            echo "Running Composer install..."
+            composer install --no-dev --prefer-dist --optimize-autoloader
+
+            echo "Setting up environment..."
+            if [ ! -f .env ]; then
+              echo "Copying .env.example to .env..."
+              cp .env.example .env
+            fi
+
+            echo "Creating storage directories..."
+            mkdir -p storage/framework/views storage/framework/cache storage/framework/sessions
+            sudo chmod -R 775 storage/framework/
+
+            echo "Creating database file..."
+            touch database/database.sqlite
+            chmod 666 database/database.sqlite
+
+            echo "Running Artisan commands..."
+            php artisan key:generate --force
+            php artisan migrate --force
+            php artisan storage:link
+            
+            echo "Clearing caches..."
+            php artisan cache:clear
+            php artisan config:clear
+            php artisan route:clear
+            php artisan view:clear
+            
+            echo "Caching for production..."
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+
+            echo "Setting final file permissions..."
+            sudo chown -R www-data:www-data storage bootstrap/cache public/uploads
+            sudo chmod -R 775 storage bootstrap/cache public/uploads
+
+            echo "Restarting services..."
+            sudo systemctl restart php8.2-fpm
+            sudo systemctl restart nginx
+
+            echo "Deployment complete!"
+          '
